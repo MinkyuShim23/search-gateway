@@ -1,0 +1,8 @@
+.env
+*.log
+searxng/settings.yml.bak
+caddy/Caddyfile.bak
+node_modules/
+__pycache__/
+*.log
+.env

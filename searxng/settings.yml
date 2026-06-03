@@ -1,0 +1,51 @@
+# SearXNG config for the Search Gateway (private instance, JSON API on).
+# Secret is a placeholder — the runbook replaces it at deploy:
+#   sed -i "s|REPLACE_WITH_OPENSSL_RAND_HEX_32|$(openssl rand -hex 32)|" searxng/settings.yml
+use_default_settings: true
+
+server:
+  secret_key: "REPLACE_WITH_OPENSSL_RAND_HEX_32"
+  limiter: false              # private instance behind Caddy auth + localhost bind → allow the JSON API
+  image_proxy: true
+  bind_address: "0.0.0.0"
+  port: 8080
+
+general:
+  instance_name: "search-gateway"
+  enable_metrics: false       # no public stats page on a private box
+
+search:
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "auto"
+  formats:
+    - html
+    - json                    # REQUIRED — this is what the MCP/agents consume
+
+redis:
+  url: redis://valkey:6379/0
+
+# --- Engine tuning -------------------------------------------------------
+# Defaults enable ~70 engines. From a datacenter IP, Brave / DuckDuckGo / Bing /
+# Startpage / Wikipedia are the reliable backbone; Google often returns CAPTCHAs
+# and is treated as best-effort, not load-bearing. Uncomment to harden further.
+engines:
+  - name: google
+    disabled: false           # keep, but expect intermittent blocks from cloud IPs
+  - name: brave
+    disabled: false
+  - name: duckduckgo
+    disabled: false
+  - name: bing
+    disabled: false
+  - name: startpage
+    disabled: false
+  - name: wikipedia
+    disabled: false
+  - name: wikidata
+    disabled: false
+  # Heavier / lower-signal engines off by default for speed:
+  - name: currency
+    disabled: true
+  - name: wikibooks
+    disabled: true

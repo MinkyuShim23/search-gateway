@@ -1,0 +1,112 @@
+# Self-Hosted Search Gateway — Phase 1 stack
+# Target: free-arm-vm (OCI Always Free, arm64). All images are multi-arch.
+# Deploy:  docker compose up -d
+#
+# NOTE: free-arm-vm already runs a host Caddy (Server Management stack).
+# This compose does NOT run its own Caddy by default — it exposes the MCP on
+# 127.0.0.1:3000 and you point your existing host Caddy at it (see caddy/Caddyfile).
+# If you have NO host Caddy, uncomment the `caddy` service at the bottom.
+
+services:
+  valkey:
+    image: valkey/valkey:8-alpine
+    container_name: sg-valkey
+    command: valkey-server --save 30 1 --loglevel warning
+    restart: unless-stopped
+    networks: [sgnet]
+    volumes:
+      - valkey-data:/data
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: sg-searxng
+    restart: unless-stopped
+    networks: [sgnet]
+    ports:
+      - "127.0.0.1:8088:8080"        # localhost only — never public (8080 already used on free-arm-vm)
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_REDIS_URL=redis://valkey:6379/0
+      - UWSGI_WORKERS=4              # 4 OCPU on free-arm-vm
+      - UWSGI_THREADS=4
+    depends_on: [valkey]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  mcp-searxng:
+    image: isokoliuk/mcp-searxng:latest   # ihor-sokoliuk/mcp-searxng (MIT) — adopted base
+    container_name: sg-mcp
+    restart: unless-stopped
+    networks: [sgnet]
+    ports:
+      - "127.0.0.1:3000:3000"        # localhost only — host Caddy fronts it with TLS + auth
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - MCP_HTTP_PORT=3000           # enables streamable-HTTP transport at /mcp ; health at /health
+    depends_on: [searxng]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  # Phase 2 router — the differentiated layer: rerank + cost-capped fallback.
+  gateway:
+    build: ./gateway
+    container_name: sg-gateway
+    restart: unless-stopped
+    networks: [sgnet]
+    ports:
+      - "127.0.0.1:3001:3001"        # localhost only; tailscale serve fronts it
+    environment:
+      - SEARXNG_URL=http://searxng:8080
+      - VALKEY_URL=redis://valkey:6379/1
+      - MCP_PORT=3001
+      - MIN_RESULTS=3
+      # default path = SearXNG + Gemini; Tavily/Exa only as a thin safety net
+      - THIN_FALLBACK=tavily,exa
+      - DEEP_SUBQUERIES=3       # agentic deep_search query decomposition
+      - GEMINI_CAP=3000         # HARD $0 guard: free is ~5,000/mo; cap well under it (covers multi-query-per-prompt). Gateway stops calling Gemini past this.
+      - TAVILY_CAP=800          # free 1,000/mo
+      - EXA_CAP=800             # free 1,000/mo
+      - GEMINI_MODEL=gemini-flash-latest
+      - GEMINI_GROUNDING=1      # billing enabled (Tier 1) 2026-06-03 → grounding on. Capped by GEMINI_CAP for $0.
+      - EXA_API_KEY=${EXA_API_KEY:-}
+      - TAVILY_API_KEY=${TAVILY_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - CRAWL4AI_URL=${CRAWL4AI_URL:-http://crawl4ai:11235}   # JS-render fallback for web_read
+    volumes:
+      - flashrank-cache:/tmp/flashrank
+    depends_on: [searxng, valkey]
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  # JS-render extractor for web_read fallback (RAM allows: 21G free on free-arm-vm).
+  crawl4ai:
+    image: unclecode/crawl4ai:latest
+    container_name: sg-crawl4ai
+    restart: unless-stopped
+    networks: [sgnet]
+    shm_size: 1gb
+    mem_limit: 3g
+    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
+
+  # --- Optional: only if free-arm-vm does NOT already run a host Caddy ---
+  # caddy:
+  #   image: caddy:2-alpine
+  #   container_name: sg-caddy
+  #   restart: unless-stopped
+  #   networks: [sgnet]
+  #   ports: ["80:80", "443:443"]
+  #   volumes:
+  #     - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+  #     - caddy-data:/data
+  #     - caddy-config:/config
+  #   depends_on: [mcp-searxng]
+
+networks:
+  sgnet:
+
+volumes:
+  valkey-data:
+  flashrank-cache:
+  # caddy-data:
+  # caddy-config:

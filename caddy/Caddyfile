@@ -1,0 +1,30 @@
+# Search Gateway — reverse-proxy snippet for the MCP HTTP endpoint.
+#
+# free-arm-vm already runs a host Caddy (Server Management stack), so APPEND this
+# block to that existing Caddyfile and `caddy reload` — do NOT run the bundled
+# caddy service (it would fight for ports 80/443).
+#
+# 1. Replace search.example.com with a real hostname you control (A record → free-arm-vm).
+# 2. Generate the password hash:
+#      docker run --rm caddy:2-alpine caddy hash-password --plaintext 'YOUR_STRONG_PASS'
+#    Paste the $2a$... output below.
+#
+search.example.com {
+    encode zstd gzip
+
+    basicauth {
+        gateway REPLACE_WITH_BCRYPT_HASH
+    }
+
+    # MCP streamable-HTTP endpoint (/mcp) + health (/health) from the mcp-searxng container
+    reverse_proxy 127.0.0.1:3000
+
+    log {
+        output file /var/log/caddy/search-gateway.log
+        format json
+    }
+}
+
+# If you have no domain, you can instead expose it over Tailscale and skip public TLS:
+#   reverse_proxy 127.0.0.1:3000   on the tailnet hostname, or just point clients at
+#   http://<tailscale-ip>:3000/mcp  (already auth-less — keep it on the tailnet only).
