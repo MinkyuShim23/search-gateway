@@ -1,0 +1,15 @@
+Search Gateway
+Copyright (c) 2026 Minkyu Shim
+Licensed under the MIT License (see LICENSE).
+
+Third-party components
+----------------------
+This project orchestrates the following components, which it does not modify or
+redistribute (they are pulled as upstream container images / packages at deploy time):
+
+- SearXNG — https://github.com/searxng/searxng — AGPL-3.0-or-later.
+  Run as an unmodified upstream container for search discovery. Only configuration
+  (searxng/settings.yml) is included in this repository.
+
+Phase 1 of this project used ihor-sokoliuk/mcp-searxng (MIT) as the MCP layer; it
+has since been replaced by the in-repo gateway/ router.
