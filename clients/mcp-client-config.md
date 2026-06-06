@@ -4,7 +4,7 @@
 
 - MCP URL: `https://YOUR-TAILNET-HOST:8443/mcp`
 - Health:  `https://YOUR-TAILNET-HOST:8443/health`
-- Tools:   `searxng_web_search`, `web_url_read`
+- Tools:   `web_search`, `deep_search`, `web_read`
 - Auth:    none needed — access is gated by the tailnet (TLS via Tailscale). Keep it tailnet-only; do NOT expose with Funnel.
 
 ## Claude Code (done via CLI)

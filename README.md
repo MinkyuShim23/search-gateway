@@ -1,78 +1,78 @@
 # 🔎 Search Gateway
 
-Self-hosted open-web search for Claude + Hermes, replacing the Exa/Tavily dependency.
-One HTTP MCP endpoint backed by SearXNG (borrows 70+ engine indexes, $0 marginal, no quota).
+Self-hosted open-web search for AI agents — one MCP endpoint that detaches Claude + Hermes
+from paid search APIs. SearXNG (70+ engine indexes, $0 marginal, no quota) is the base; a small
+router adds reranking, a budget-capped paid fallback, and page extraction. Normal queries cost **$0**.
 
-- **Project:** AI Area → 🔎 Self-Hosted Search Gateway
-- **ADR / decision:** `Engineering & AI Systems/ADR-Self-Hosted-Search-Gateway_2026-06-03.md`
-- **Host:** `free-arm-vm` (OCI Always Free, 4 OCPU / 24 GB, arm64) — shares the box with Hermes + host Caddy.
-- **Adopted base:** [`ihor-sokoliuk/mcp-searxng`](https://github.com/ihor-sokoliuk/mcp-searxng) (MIT).
+- **Built on:** SearXNG (AGPL, run as an upstream container — not vendored) for discovery; the in-repo `gateway/` router is the layer this project owns. Phase 1 used [`ihor-sokoliuk/mcp-searxng`](https://github.com/ihor-sokoliuk/mcp-searxng) (MIT), since replaced by `gateway/app.py`.
+- **Host:** any small box (built on an OCI Always Free arm64 VM, 4 OCPU / 24 GB, shared with other agents). Exposed **tailnet-only** via Tailscale serve (`:8443`) — no public surface.
 
 ```
-SearXNG (discovery) ──> mcp-searxng (search + url_read, HTTP /mcp) ──> host Caddy (TLS+auth) ──> Claude / Hermes
-        │                                                                         
-        └── Valkey (cache)                  Phase 2 adds: reranker · Crawl4AI extract · Exa/Tavily fallback w/ cost cap
+SearXNG (70+ engines) ─┐
+Gemini grounding ───────┤   (deep_search only)
+Tavily / Exa (capped) ──┴─> sg-gateway router ─> Tailscale serve :8443 ─> Claude / Hermes
+                                  │   tools: web_search · deep_search · web_read
+                                  └── Valkey (cache + monthly budget counters)
 ```
+
+## Tools (multi-source router — `gateway/app.py`)
+- **`web_search`** — fast, free, everyday default (~1s): SearXNG + FlashRank rerank + domain-authority prior. SearXNG already covers Google/Bing/Brave/etc. **No Gemini grounding here** (it's ~40s — reserved for `deep_search`); Tavily then Exa fire only as a thin fallback when results come back sparse (< `MIN_RESULTS`, default 3). Normally $0.
+- **`deep_search`** — agentic full fan-out: Gemini decomposes the task into sub-queries (`DEEP_SUBQUERIES`, default 3), then SearXNG + Gemini fan out across every sub-query and Tavily + Exa fire once on the main query → merge → dedupe → rerank. Bounded to one planning round (the iterative loop stays in the client). Spends quota within caps; use for hard queries.
+- **`web_read`** — trafilatura extraction (free); optional Crawl4AI render if `CRAWL4AI_URL` is set.
+
+Monthly caps (free-tier-safe, override via env): **Gemini 4,800** (`GEMINI_CAP`) · **Tavily 800** (`TAVILY_CAP`) · **Exa 800** (`EXA_CAP`). Each provider activates only when its key is present **and** its cap has room; budgets are tracked per month in Valkey and reported in every search response. All keys are optional — SearXNG alone is a working $0 gateway.
 
 ## Architecture notes
-- **Two clients, one service.** The MCP runs in HTTP transport (`MCP_HTTP_PORT=3000`), so both Claude (remote, via Caddy) and Hermes (local, `127.0.0.1:3000`) use the same instance.
-- **No second Caddy.** `free-arm-vm` already has a host Caddy — we expose the MCP on localhost and add a reverse-proxy block to the existing Caddy. The bundled `caddy` service stays commented out.
-- **No on-box LLM.** Synthesis is the client's job; we don't run Ollama and compete with Hermes for RAM.
+- **Two clients, one service.** The router runs HTTP transport (`MCP_HTTP_PORT=3000`), so Claude (remote, over the tailnet) and Hermes (local, `127.0.0.1:3000`) share one instance.
+- **Tailnet-first.** Access is gated by Tailscale (TLS handled by `tailscale serve`), so no auth layer or public DNS is required. A public-domain alternative (host Caddy + basic auth) is available but not the default — see `clients/mcp-client-config.md`.
+- **No on-box LLM.** Synthesis is the client's job; we don't run Ollama and compete for RAM.
 
-## Deploy (run on free-arm-vm)
+## Deploy
 
 ```bash
-# 0. Get the bundle onto the VM (rsync from your Mac, or git):
-#    rsync -av ~/Projects/personal/search-gateway/ free-arm-vm:~/search-gateway/
+# 0. Get the bundle onto the host (rsync from your Mac, or git clone):
+#    rsync -av ./search-gateway/ your-host:~/search-gateway/
 cd ~/search-gateway
 
 # 1. SearXNG secret
 sed -i "s|REPLACE_WITH_OPENSSL_RAND_HEX_32|$(openssl rand -hex 32)|" searxng/settings.yml
 
-# 2. Bring up the stack
-docker compose up -d
-docker compose ps
+# 2. (optional) add provider keys for the paid fallback / deep_search
+cp .env.example .env && $EDITOR .env      # all keys optional; SearXNG works with none
 
-# 3. Acceptance check (needs: jq)
-chmod +x scripts/smoke_test.sh && ./scripts/smoke_test.sh
-#    Expect RESULT: GREEN. If FAILs cluster on one engine, see Troubleshooting.
+# 3. Bring up the stack
+docker compose up -d && docker compose ps
 
-# 4. Front it with your existing host Caddy
-#    - point an A record (e.g. search.yourdomain) at YOUR-VM-IP
-#    - hash a password:
-docker run --rm caddy:2-alpine caddy hash-password --plaintext 'YOUR_STRONG_PASS'
-#    - paste hash + hostname into caddy/Caddyfile, append that block to your host Caddyfile, then:
-#      caddy reload   (or: systemctl reload caddy)
-curl -u gateway:YOUR_STRONG_PASS https://search.yourdomain/health   # -> ok
+# 4. Acceptance check (needs: jq)
+chmod +x scripts/smoke_test.sh && ./scripts/smoke_test.sh   # expect RESULT: GREEN
+
+# 5. Expose it tailnet-only (recommended — no public surface, TLS via Tailscale)
+tailscale serve --bg --https=8443 127.0.0.1:3000
+HOST=$(tailscale status --json | jq -r .Self.DNSName | sed 's/\.$//')
+curl https://$HOST:8443/health    # -> ok
+#    (Public-domain alternative via host Caddy + basic auth: see clients/mcp-client-config.md.)
 ```
 
 ## Wire the clients
-See `clients/mcp-client-config.md`. Add `search-gateway` to Claude Code, Claude Desktop, and Hermes; make it the default web-search path; keep Exa/Tavily connected-but-idle until parity is confirmed.
+See `clients/mcp-client-config.md`. Add `search-gateway` to Claude Code, Claude Desktop, and Hermes; make it the default web-search path. (Tip: keep any paid search connectors idle until you've confirmed parity.)
 
 ## Operations
-- **Logs:** `docker compose logs -f searxng mcp-searxng`
+- **Logs:** `docker compose logs -f gateway searxng`
 - **Update:** `docker compose pull && docker compose up -d`
-- **Health for monitoring:** add `https://search.yourdomain/health` to Uptime Kuma and a Healthchecks ping (consistent with the Server Management stack).
-- **RAM watch:** Crawl4AI (Phase 2) launches headless Chromium — cap concurrency so it doesn't starve Hermes. Phase-1 stack idles ~0.5–1 GB.
+- **Rebuild after code changes:** `docker compose build gateway && docker compose up -d gateway`
+- **Toggle a paid provider:** set/clear `GEMINI_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY` in `.env`, then `docker compose up -d gateway`.
+- **Health for monitoring:** point Uptime Kuma + a Healthchecks ping at `https://<tailnet-host>:8443/health`.
+- **RAM watch:** Crawl4AI (optional) launches headless Chromium — cap concurrency so it doesn't starve co-tenants. The base stack idles ~0.5–1 GB.
 
 ## Troubleshooting
-- **Many FAILs / Google CAPTCHAs:** expected from a datacenter IP. Lean on Brave/DDG/Bing/Startpage (already enabled); disable the worst offender in `searxng/settings.yml`. This is exactly what the Phase-2 Exa/Tavily fallback is reserved for.
-- **`format=json` 403:** ensure `search.formats` includes `json` and `server.limiter: false` in settings.yml; `docker compose restart searxng`.
-- **Client can't auth:** verify `GATEWAY_BASIC_B64 = base64("user:pass")` matches the password you hashed into the Caddyfile.
-
-## Tools (multi-source router — `gateway/app.py`)
-- **`web_search`** — cost-conscious default: SearXNG (free) + FlashRank rerank + domain-authority prior; paid/grounded fallback **Gemini → Tavily → Exa** only when results are thin, each behind a monthly free-tier cap. Normally $0.
-- **`deep_search`** — deliberate full fan-out: SearXNG + Gemini + Tavily + Exa **in parallel** → merge → dedupe → rerank. Spends quota (within caps); use for hard queries.
-- **`web_read`** — trafilatura extraction (free); optional Crawl4AI render if `CRAWL4AI_URL` set.
-
-Caps (monthly, free-tier-safe): Gemini 4,500 · Tavily 800 · Exa 800. Each provider needs its key in `.env` (Exa set; add `TAVILY_API_KEY`, `GEMINI_API_KEY`). Budgets tracked in Valkey, reported in every search response.
+- **Many FAILs / Google CAPTCHAs:** expected from a datacenter IP. Lean on Brave/DDG/Bing/Startpage (already enabled); disable the worst offender in `searxng/settings.yml`. This is what the Tavily/Exa fallback is reserved for.
+- **`format=json` 403:** ensure `search.formats` includes `json` and `server.limiter: false` in `searxng/settings.yml`; `docker compose restart searxng`.
+- **Gemini grounding 429s:** grounding needs a billing-enabled Google project (free 5k/mo allocation, $0 under cap); a pure free-tier key 429s on grounding. Plain Gemini (deep_search planning) works regardless.
 
 ## Roadmap / status
-- **Phase 1 — done.** SearXNG + adopted mcp-searxng, clients wired, GREEN smoke test.
-- **Phase 2 — done.** Multi-source router `sg-gateway` (`127.0.0.1:3001`) live; tailnet `:8443` points to it; tools `web_search`/`deep_search`/`web_read`. Polish done: domain-authority rerank prior; Hermes routed via gateway MCP; redundant `sg-mcp` stopped; Crawl4AI as opt-in (`CRAWL4AI_URL`).
-  - *Pending your keys:* add `TAVILY_API_KEY` + `GEMINI_API_KEY` to `~/search-gateway/.env` then `docker compose up -d gateway` to light up Tavily + Gemini.
-- **Fork B — parked (recorded, dropped for now):** owned-corpus semantic engine (Qdrant) — belongs to Agentic Engineering · research engine, not this project.
+- **Phase 1 — done.** SearXNG base, clients wired, GREEN smoke test.
+- **Phase 2 — done.** Multi-source router live (`127.0.0.1:3000`, tailnet `:8443`); tools `web_search` / `deep_search` / `web_read`; domain-authority rerank prior; Hermes routed via the gateway MCP; Crawl4AI as an opt-in extractor (`CRAWL4AI_URL`).
+- **Parked:** owned-corpus semantic engine (Qdrant) — belongs to a separate research-engine project, not this one.
 
-## Phase 2 ops
-- Enable/disable paid fallback: set/clear `EXA_API_KEY` (or `TAVILY_API_KEY`) in `~/search-gateway/.env`, then `docker compose up -d gateway`. Budget cap = `MONTHLY_FALLBACK_BUDGET` (default 500), tracked per month in Valkey db1.
-- Rebuild after code changes: `docker compose build gateway && docker compose up -d gateway`.
+## License
+MIT (this repo's own code — see `LICENSE`). SearXNG is AGPL-3.0 and is run as an unmodified upstream container, not redistributed here.
