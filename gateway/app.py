@@ -19,6 +19,7 @@ degradation everywhere; synthesis is the client's job.
 
 from __future__ import annotations
 
+import contextlib
 import datetime as dt
 import json
 import os
@@ -121,10 +122,8 @@ def _cget(k):
 
 def _cset(k, v, ttl):
     if _cache:
-        try:
+        with contextlib.suppress(Exception):
             _cache.setex(k, ttl, json.dumps(v))
-        except Exception:
-            pass
 
 
 def _month():
@@ -158,10 +157,8 @@ def _budget_report():
     for p, cap in CAPS.items():
         used = 0
         if _cache:
-            try:
+            with contextlib.suppress(Exception):
                 used = int(_cache.get(f"sg:fb:{p}:{_month()}") or 0)
-            except Exception:
-                pass
         out[p] = {"used": used, "cap": cap}
     return out
 
