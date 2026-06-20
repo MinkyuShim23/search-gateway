@@ -1,0 +1,6 @@
+line-length = 100
+
+[lint]
+# Clean autofixable baseline (ruff default E-subset + pyflakes + import sort).
+# Expand with "UP","B","SIM" when you want stricter linting.
+select = ["E4", "E7", "E9", "F", "I"]
