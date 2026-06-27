@@ -109,6 +109,16 @@ except Exception:
 mcp = FastMCP("search-gateway", host="0.0.0.0", port=MCP_PORT)
 
 
+# Liveness probe for Uptime Kuma / Healthchecks (tailnet :8443/health -> here).
+from starlette.requests import Request  # noqa: E402
+from starlette.responses import PlainTextResponse  # noqa: E402
+
+
+@mcp.custom_route("/health", methods=["GET"])
+async def _health(_req: Request) -> PlainTextResponse:
+    return PlainTextResponse("ok")
+
+
 # ---- cache + budget ------------------------------------------------------
 def _cget(k):
     if not _cache:
@@ -359,24 +369,27 @@ def _parallel(jobs, max_workers=6):
 # ---- tools ---------------------------------------------------------------
 @mcp.tool()
 def web_search(query: str, limit: int = 8) -> str:
-    """Default web search (fast, free, everyday): SearXNG + rerank. SearXNG already
-    queries Google/Bing/Brave/etc. Tavily/Exa fire only as a thin fallback when results
-    are sparse. (Gemini grounding is ~40s, so it lives in deep_search, not here.)
+    """Default web search (quality-first, bounded latency): SearXNG + Exa + Tavily in
+    parallel -> rerank. All three always fire (each budget-gated in _run; no key / exhausted
+    cap -> [], so it degrades gracefully to SearXNG). Fast (~2-3s) so it stays under MCP
+    client request timeouts. Gemini grounding (~40s) lives in deep_search, not here —
+    putting it in the default path makes web_search time out. SearXNG already covers Google.
     Returns JSON {query,count,reranked,sources_used,budgets,results:[...]}."""
     ckey = f"sg:search:{limit}:{query}"
     if c := _cget(ckey):
         return json.dumps(c, ensure_ascii=False)
-    # default stays fast (~1s): SearXNG + rerank. Gemini grounding (~40s, multi-search
-    # + synthesis) lives in deep_search, not here. SearXNG already queries Google.
-    items, used = _parallel([("searxng", query, max(limit, 5))], max_workers=1)
-    if len(_dedupe(items)) < MIN_RESULTS:  # thin safety net
+    # Quality-first but bounded latency: fan out SearXNG + Exa + Tavily (each budget-gated in
+    # _run). Gemini grounding (~40s) stays in deep_search so web_search never exceeds the MCP
+    # client request timeout (a Gemini-in-web_search build timed out end-to-end).
+    jobs = [("searxng", query, max(limit, 5))]
+    jobs += [(prov, query, max(limit, 5)) for prov in THIN_FALLBACK]  # exa, tavily
+    items, used = _parallel(jobs, max_workers=4)
+    if len(_dedupe(items)) < MIN_RESULTS:  # last-resort safety net if everything came back sparse
         for prov in THIN_FALLBACK:
             got = _run(prov, query, max(limit, 5))
             if got:
                 items += got
                 used.add(prov)
-            if len(_dedupe(items)) >= max(limit, MIN_RESULTS):
-                break
     ranked = _rerank(query, items, limit)
     payload = {
         "query": query,

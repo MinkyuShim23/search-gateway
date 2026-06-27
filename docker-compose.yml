@@ -36,19 +36,6 @@ services:
     cap_add: [CHOWN, SETGID, SETUID]
     logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
 
-  mcp-searxng:
-    image: isokoliuk/mcp-searxng:latest   # ihor-sokoliuk/mcp-searxng (MIT) — adopted base
-    container_name: sg-mcp
-    restart: unless-stopped
-    networks: [sgnet]
-    ports:
-      - "127.0.0.1:3000:3000"        # localhost only — host Caddy fronts it with TLS + auth
-    environment:
-      - SEARXNG_URL=http://searxng:8080
-      - MCP_HTTP_PORT=3000           # enables streamable-HTTP transport at /mcp ; health at /health
-    depends_on: [searxng]
-    logging: { driver: json-file, options: { max-size: "10m", max-file: "3" } }
-
   # Phase 2 router — the differentiated layer: rerank + cost-capped fallback.
   gateway:
     build: ./gateway
@@ -62,12 +49,12 @@ services:
       - VALKEY_URL=redis://valkey:6379/1
       - MCP_PORT=3001
       - MIN_RESULTS=3
-      # default path = SearXNG + Gemini; Tavily/Exa only as a thin safety net
+      # quality-first: web_search always fans out SearXNG + Exa + Tavily (THIN_FALLBACK), reranked
       - THIN_FALLBACK=tavily,exa
       - DEEP_SUBQUERIES=3       # agentic deep_search query decomposition
-      - GEMINI_CAP=3000         # HARD $0 guard: free is ~5,000/mo; cap well under it (covers multi-query-per-prompt). Gateway stops calling Gemini past this.
-      - TAVILY_CAP=800          # free 1,000/mo
-      - EXA_CAP=800             # free 1,000/mo
+      - GEMINI_CAP=4800         # HARD $0 guard: free ~5,000/mo. Bumped for always-on grounding in web_search; still under free tier ($0).
+      - TAVILY_CAP=950          # free 1,000/mo — always-on now; kept just under free tier ($0)
+      - EXA_CAP=950             # free 1,000/mo — always-on now; kept just under free tier ($0)
       - GEMINI_MODEL=gemini-flash-latest
       - GEMINI_GROUNDING=1      # billing enabled (Tier 1) 2026-06-03 → grounding on. Capped by GEMINI_CAP for $0.
       - EXA_API_KEY=${EXA_API_KEY:-}
