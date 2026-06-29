@@ -8,7 +8,7 @@ router adds reranking, a budget-capped paid fallback, and page extraction. Norma
 - **Host:** any small box (built on an OCI Always Free arm64 VM, 4 OCPU / 24 GB, shared with other agents). Exposed **tailnet-only** via Tailscale serve (`:8443`) — no public surface.
 
 ```
-SearXNG (70+ engines) ─┐
+SearXNG (70+ engines) ──┐
 Gemini grounding ───────┤   (deep_search only)
 Tavily / Exa (capped) ──┴─> sg-gateway router ─> Tailscale serve :8443 ─> Claude / Hermes
                                   │   tools: web_search · deep_search · web_read
